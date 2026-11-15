@@ -70,10 +70,11 @@ The pause menu's Controls shows the same for the game being played.
   Blows has next to no text. The menus around the games are in the three languages.
 - **FSR 2–4, XeSS, the NPU**: built for 3D games (they need depth and motion from the game's engine); a 2D
   picture from an emulator has neither. FSR 1 and the neural nets work on finished pictures and are in.
-- **Ace Ventura** (7th Level, 1996) is a 16-bit Windows 3.1 game, not a DOS one, so it isn't in the shell
-  and gets none of the above. `ace-ventura.sh` in the source runs it through Wine and OTVDM (winevdm), full
-  screen with gamescope; OTVDM needs `ace-otvdm-patch.py` run on it once (the game crashes a few seconds in
-  without it). What to put where is at the top of the script.
+- **Ace Ventura** (7th Level, 1996) is a 16-bit Windows 3.1 game, not a DOS one, so it isn't in the shell.
+  `ace-ventura.sh` in the source runs it through Wine and OTVDM (winevdm) in a small hidden X server, and
+  `oldies-view` shows that server's picture with the 256-colour dithering taken out, upscaled by FSR 1 or
+  the neural nets (F7), with a controller's stick as the mouse. OTVDM needs `ace-otvdm-patch.py` run on it
+  once (the game crashes a few seconds in without it). What to put where is at the top of the script.
 
 ## Building
 

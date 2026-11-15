@@ -8,7 +8,11 @@ LIBS = `sdl2-config --libs` -lGLESv2 -ldl
 OBJS = obj/shell.o obj/gfx.o obj/ui.o
 VERSION = $(shell sed -n 's/^\#define OLDIES_VERSION "\(.*\)"/\1/p' shell.cpp)
 
-all: obj oldies
+all: obj oldies oldies-view
+
+# the viewer for a game in an X server of its own (Ace Ventura under Wine): needs libX11, libXext, libXtst, libXfixes
+oldies-view: obj/winview.o obj/gfx.o
+	$(CXX) -static-libstdc++ -static-libgcc -o $@ $^ $(LIBS) -lX11 -lXext -lXtst -lXfixes
 
 oldies: $(OBJS)
 	$(CXX) -static-libstdc++ -static-libgcc -o $@ $^ $(LIBS)
@@ -32,6 +36,6 @@ dist: all
 	cd dist && tar -czf oldies-linux-$(VERSION).tar.gz oldies
 
 clean:
-	rm -rf obj oldies
+	rm -rf obj oldies oldies-view
 
 -include obj/*.d
