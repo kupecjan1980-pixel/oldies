@@ -99,6 +99,7 @@ static int g_scale = kScaleNeuralM;
 static bool g_fullHd = false, g_frameGen = true, g_fullscreen = true;
 static int g_slot = 1;
 static std::map<std::string, std::string> g_dirs; // a game's id -> where its files are
+static std::map<std::string, int> g_gameLang;     // a game's id -> which of its own languages
 
 static const char *T(const char *en, const char *cs, const char *sk) { return g_lang == "cs" ? cs : g_lang == "sk" ? sk : en; }
 static int li() { return g_lang == "cs" ? 1 : g_lang == "sk" ? 2 : 0; }
@@ -121,6 +122,7 @@ static void loadConfig() {
 		else if (k == "fullscreen") g_fullscreen = v != "0";
 		else if (k == "slot") g_slot = atoi(v.c_str());
 		else if (k.compare(0, 4, "dir.") == 0) g_dirs[k.substr(4)] = v;
+		else if (k.compare(0, 9, "gamelang.") == 0) g_gameLang[k.substr(9)] = atoi(v.c_str());
 	}
 	if (g_lang != "en" && g_lang != "cs" && g_lang != "sk") g_lang = "";
 	if (g_scale < 0 || g_scale >= kScaleCount) g_scale = kScaleNeuralM;
@@ -135,6 +137,10 @@ static void saveConfig() {
 	std::string out = buf;
 	for (std::map<std::string, std::string>::iterator it = g_dirs.begin(); it != g_dirs.end(); ++it) {
 		out += "dir." + it->first + "=" + it->second + "\n";
+	}
+	for (std::map<std::string, int>::iterator it = g_gameLang.begin(); it != g_gameLang.end(); ++it) {
+		snprintf(buf, sizeof(buf), "gamelang.%s=%d\n", it->first.c_str(), it->second);
+		out += buf;
 	}
 	writeFile(configDir() + "/config.ini", out);
 }
@@ -184,6 +190,7 @@ struct Core {
 static Core g_core;
 static const Game *g_game;
 static std::string g_gameDir;
+static void toast(const std::string &text, float seconds);
 static enum retro_pixel_format g_pixfmt = RETRO_PIXEL_FORMAT_0RGB1555;
 static retro_keyboard_event_t g_keyboardCb;
 static struct retro_system_av_info g_av;
@@ -320,7 +327,12 @@ static void sendKey(unsigned key, bool down) {
 	}
 }
 
+static bool g_dirHeld[4];        // up, down, left, right
+static unsigned g_dirKeys[2];    // the keys down for them now
+
 static void releaseAll() {
+	memset(g_dirHeld, 0, sizeof(g_dirHeld));
+	g_dirKeys[0] = g_dirKeys[1] = 0;
 	for (unsigned k = 1; k < RETROK_LAST; ++k) {
 		sendKey(k, false);
 	}
@@ -380,7 +392,21 @@ static bool loadState(int slot) {
 // --- the window, the picture, the menus ----------------------------------------------------------------------
 
 enum { kNone, kGames, kFolder, kLanguage, kPause, kControls, kHint, kMessage };
-enum { kPResume, kPSave, kPLoad, kPHint, kPControls, kPScale, kPFrames, kPLang, kPFull, kPFolder, kPReset, kPGames, kPQuit, kPCount };
+// a game whose texts are one file per language (Metal Mutant's TEXTE.EN / .ES / .FR): the picked one is
+// copied over the file the game reads. True when the folder has those files.
+static bool gameLangs(const Game &game, const std::string &dir) {
+	return game.gameLang[0][0] && !readFile(dir + "/" + game.gameLangFile[0]).empty();
+}
+
+static void applyGameLang(const Game &game, const std::string &dir) {
+	if (!gameLangs(game, dir)) return;
+	int which = g_gameLang.count(game.id) ? g_gameLang[game.id] : 0;
+	if (which < 0 || which > 2 || !game.gameLang[which][0]) which = 0;
+	const std::string text = readFile(dir + "/" + game.gameLangFile[which]);
+	if (!text.empty() && text != readFile(dir + "/" + game.gameLangFile[3])) writeFile(dir + "/" + game.gameLangFile[3], text);
+}
+
+enum { kPResume, kPSave, kPLoad, kPHint, kPControls, kPScale, kPFrames, kPLang, kPGameLang, kPFull, kPFolder, kPReset, kPGames, kPQuit, kPCount };
 
 static SDL_Window *g_window;
 static Gfx *g_gfx;
@@ -516,6 +542,16 @@ static void adjust(int dir) {
 		case kPScale: cycleScale(dir); break;
 		case kPFrames: toggleFrameGen(); break;
 		case kPLang: { static const char *o[] = { "en", "cs", "sk" }; g_lang = o[(li() + dir + 3) % 3]; saveConfig(); } break;
+		case kPGameLang:
+			if (g_game && gameLangs(*g_game, g_gameDir)) {
+				int n = 0;
+				while (n < 3 && g_game->gameLang[n][0]) ++n;
+				g_gameLang[g_game->id] = ((g_gameLang.count(g_game->id) ? g_gameLang[g_game->id] : 0) + dir + n) % n;
+				saveConfig();
+				applyGameLang(*g_game, g_gameDir);
+				toast(T("The game's language changes when it's started anew", "Jazyk hry se změní po novém spuštění hry", "Jazyk hry sa zmení po novom spustení hry"), 3.0f);
+			}
+			break;
 		case kPFull:
 			g_fullscreen = !g_fullscreen;
 			SDL_SetWindowFullscreen(g_window, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -565,7 +601,7 @@ static void accept() {
 		case kPLoad: if (!loadState(g_slot)) toast(T("Nothing saved in this slot", "V této pozici nic uloženo není", "V tejto pozícii nie je nič uložené")); g_screen = kNone; break;
 		case kPHint: openScreen(kHint); break;
 		case kPControls: openScreen(kControls); break;
-		case kPScale: case kPFrames: case kPLang: case kPFull: adjust(1); break;
+		case kPScale: case kPFrames: case kPLang: case kPGameLang: case kPFull: adjust(1); break;
 		case kPFolder: g_pick = g_game; g_first = false; openScreen(kFolder); browseTo(parentOf(g_gameDir)); break;
 		case kPReset: g_core.reset(); g_screen = kNone; break;
 		case kPGames: g_wantBackToGames = true; g_screen = kNone; break;
@@ -745,6 +781,10 @@ static void render(Canvas &c, const Info &info) {
 				else value = T("‹ off ›", "‹ vypnuto ›", "‹ vypnuté ›");
 				break;
 			case kPLang: label = T("Menus' language", "Jazyk nabídek", "Jazyk ponúk"); value = std::string("‹ ") + (li() == 1 ? "Čeština" : li() == 2 ? "Slovenčina" : "English") + " ›"; break;
+			case kPGameLang: label = T("The game's language", "Jazyk hry", "Jazyk hry");
+				if (g_game && gameLangs(*g_game, g_gameDir)) value = std::string("‹ ") + g_game->gameLang[g_gameLang.count(g_game->id) ? g_gameLang[g_game->id] : 0] + " ›";
+				else value = T("only the one it has", "jen ten, který má", "len ten, ktorý má");
+				break;
 			case kPFull: label = T("Full screen", "Celá obrazovka", "Celá obrazovka"); value = g_fullscreen ? T("on", "zapnuto", "zapnuté") : T("off", "vypnuto", "vypnuté"); break;
 			case kPFolder: label = T("Game files folder…", "Složka se soubory hry…", "Priečinok so súbormi hry…"); break;
 			case kPReset: label = T("Start the game anew", "Spustit hru znovu", "Spustiť hru znova"); break;
@@ -890,11 +930,55 @@ static void openPad() {
 	}
 }
 
-// a controller's button for the game: the key the game's own controls have for it (games.h)
-static void padButton(int button, bool down) {
+// a controller's button for the game: the key the game's own controls have for it (games.h). The four
+// directions go together: two of them held are the game's own key for that diagonal, where it has one
+// (DOS games read the keypad's 7 9 1 3 for those, not two keys at once)
+
+static unsigned padKeyOf(int button) {
 	for (int i = 0; g_game && i < kMaxPadKeys && g_game->keys[i].what[0]; ++i) {
-		if (g_game->keys[i].button == button) sendKey(g_game->keys[i].key, down);
+		if (g_game->keys[i].button == button) return g_game->keys[i].key;
 	}
+	return 0;
+}
+
+static void applyDirs() {
+	const bool u = g_dirHeld[0] && !g_dirHeld[1], d = g_dirHeld[1] && !g_dirHeld[0];
+	const bool l = g_dirHeld[2] && !g_dirHeld[3], r = g_dirHeld[3] && !g_dirHeld[2];
+	unsigned want[2] = { 0, 0 };
+	const int corner = (u && r) ? 0 : (d && r) ? 1 : (d && l) ? 2 : (u && l) ? 3 : -1;
+	if (corner >= 0 && g_game && g_game->diag[corner]) {
+		want[0] = g_game->diag[corner];
+	} else {
+		want[0] = u ? padKeyOf(SDL_CONTROLLER_BUTTON_DPAD_UP) : d ? padKeyOf(SDL_CONTROLLER_BUTTON_DPAD_DOWN) : 0;
+		want[1] = l ? padKeyOf(SDL_CONTROLLER_BUTTON_DPAD_LEFT) : r ? padKeyOf(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) : 0;
+	}
+	for (int i = 0; i < 2; ++i) {
+		if (g_dirKeys[i] && g_dirKeys[i] != want[0] && g_dirKeys[i] != want[1]) sendKey(g_dirKeys[i], false);
+	}
+	for (int i = 0; i < 2; ++i) {
+		if (want[i]) sendKey(want[i], true);
+		g_dirKeys[i] = want[i];
+	}
+}
+
+static void padButton(int button, bool down) {
+	if (button >= SDL_CONTROLLER_BUTTON_DPAD_UP && button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+		g_dirHeld[button - SDL_CONTROLLER_BUTTON_DPAD_UP] = down;
+		applyDirs();
+		return;
+	}
+	sendKey(padKeyOf(button), down);
+}
+
+// the keyboard's arrows are the directions too (a laptop has no keypad for a game that wants one)
+static int arrowButton(SDL_Keycode sym) {
+	switch (sym) {
+	case SDLK_UP: return SDL_CONTROLLER_BUTTON_DPAD_UP;
+	case SDLK_DOWN: return SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+	case SDLK_LEFT: return SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+	case SDLK_RIGHT: return SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+	}
+	return -1;
 }
 
 static void quickSave() { toast(saveState(g_slot) ? T("Saved", "Uloženo", "Uložené") : T("This game's state can't be saved", "Stav této hry uložit nejde", "Stav tejto hry sa uložiť nedá")); }
@@ -1018,11 +1102,17 @@ static void handleEvent(const SDL_Event &ev) {
 		case SDLK_F8: if (g_game) { toggleFrameGen(); toast(g_gfx->frameGen() ? T("Frames in between: on", "Snímky navíc: zapnuto", "Snímky navyše: zapnuté") : T("Frames in between: off", "Snímky navíc: vypnuto", "Snímky navyše: vypnuté"), 3.0f); } break;
 		case SDLK_F5: if (g_game) quickSave(); break;
 		case SDLK_F9: if (g_game) loadState(g_slot); break;
-		default: sendKey(retroKey(ev.key.keysym.sym), true); break;
+		default:
+			if (g_game && arrowButton(ev.key.keysym.sym) >= 0) padButton(arrowButton(ev.key.keysym.sym), true);
+			else sendKey(retroKey(ev.key.keysym.sym), true);
+			break;
 		}
 		break;
 	case SDL_KEYUP:
-		if (!menu) sendKey(retroKey(ev.key.keysym.sym), false);
+		if (!menu) {
+			if (g_game && arrowButton(ev.key.keysym.sym) >= 0) padButton(arrowButton(ev.key.keysym.sym), false);
+			else sendKey(retroKey(ev.key.keysym.sym), false);
+		}
 		break;
 	}
 }
@@ -1077,9 +1167,9 @@ static bool startGame(const Game &game) {
 	const std::string core = corePath(getenv("OLDIES_CORE") ? getenv("OLDIES_CORE") : game.core);
 	if (core.empty()) {
 		message(std::string(T("The emulator core is missing: ", "Chybí jádro emulátoru: ", "Chýba jadro emulátora: ")) + game.core + "_libretro.so\n\n"
-			+ T("Put it into the 'cores' folder beside the program (see the README: it's built from DOSBox Pure's source, or taken from RetroArch).",
-			    "Dej ho do složky „cores“ vedle programu (viz README: sestaví se ze zdrojového kódu DOSBox Pure, nebo se vezme z RetroArch).",
-			    "Daj ho do priečinka „cores“ vedľa programu (pozri README: zostaví sa zo zdrojového kódu DOSBox Pure, alebo sa vezme z RetroArch)."));
+			+ T("Run ./install.sh in the program's folder: it fetches the core. Or put the file into the 'cores' folder there yourself.",
+			    "Spusť ./install.sh ve složce programu: jádro stáhne. Nebo dej soubor do tamní složky „cores“ sám.",
+			    "Spusti ./install.sh v priečinku programu: jadro stiahne. Alebo daj súbor do tamojšieho priečinka „cores“ sám."));
 		return false;
 	}
 	std::string why;
@@ -1087,6 +1177,7 @@ static bool startGame(const Game &game) {
 		message(std::string(T("The emulator core could not be loaded: ", "Jádro emulátoru se nepodařilo načíst: ", "Jadro emulátora sa nepodarilo načítať: ")) + why);
 		return false;
 	}
+	applyGameLang(game, dir);
 	g_game = &game;
 	g_gameDir = dir;
 	g_systemDir = dataHome() + "/system";
@@ -1148,7 +1239,7 @@ static void applyAv() {
 		g_audioRate = rate;
 		if (g_audio) SDL_PauseAudioDevice(g_audio, 0);
 	}
-	g_gfx->setAspect(g_av.geometry.aspect_ratio > 0 ? g_av.geometry.aspect_ratio : 4.f / 3);
+	g_gfx->setAspect(4.f / 3); // (a DOS game's 320x200 or 640x480 filled a 4:3 screen, whatever its pixels' count says)
 }
 
 int main(int argc, char *argv[]) {

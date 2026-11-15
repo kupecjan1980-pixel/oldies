@@ -33,6 +33,9 @@ struct Game {
 	const char *id, *name, *year, *core, *exe;
 	const char *marks[4];
 	const char *options[10][2];
+	unsigned diag[4];      // the keys for up-right, down-right, down-left, up-left, where the game has its own (0: none)
+	const char *gameLang[3];   // the game's own languages, where its texts are a file to swap ("": none), and
+	const char *gameLangFile[4]; //   their files, the last the one the game reads: copied over it before the start
 	PadKey keys[kMaxPadKeys];
 	Hint hints[kMaxHints];
 };
@@ -42,14 +45,15 @@ static const Game kGames_[] = {
 	  { "BODYBLOW.GFX", 0 },
 	  { { "dosbox_pure_cycles", "auto" }, { "dosbox_pure_aspect_correction", "false" }, { "dosbox_pure_menu_time", "0" },
 	    { "dosbox_pure_auto_mapping", "false" }, { "dosbox_pure_on_screen_keyboard", "false" }, { "", "" } },
-	  { // (the game's own keys are set in its options screen; these are its defaults as far as known)
+	  { RETROK_PAGEUP, RETROK_PAGEDOWN, RETROK_END, RETROK_HOME },
+	  { "", "", "" }, { "", "", "", "" },
+	  { // (the first player's keys as the game's own BB.CFG has them: the cursor keys, the four corner keys of
+	    // the keypad for the diagonals, Enter the fire button)
 	    { SDL_CONTROLLER_BUTTON_DPAD_UP, RETROK_UP, { "Jump", "Skok", "Skok" }, "D-pad ↑", "↑" },
 	    { SDL_CONTROLLER_BUTTON_DPAD_DOWN, RETROK_DOWN, { "Crouch", "Dřep", "Drep" }, "D-pad ↓", "↓" },
 	    { SDL_CONTROLLER_BUTTON_DPAD_LEFT, RETROK_LEFT, { "Left", "Doleva", "Doľava" }, "D-pad ←", "←" },
 	    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, RETROK_RIGHT, { "Right", "Doprava", "Doprava" }, "D-pad →", "→" },
-	    { SDL_CONTROLLER_BUTTON_A, RETROK_RCTRL, { "Hit (with a direction: the moves)", "Úder (se směrem: chvaty)", "Úder (so smerom: chvaty)" }, "A", "Right Ctrl" },
-	    { SDL_CONTROLLER_BUTTON_X, RETROK_RETURN, { "Confirm in the menus", "Potvrdit v nabídkách", "Potvrdiť v ponukách" }, "X", "Enter" },
-	    { SDL_CONTROLLER_BUTTON_Y, RETROK_SPACE, { "Space", "Mezerník", "Medzerník" }, "Y", "Space" },
+	    { SDL_CONTROLLER_BUTTON_A, RETROK_RETURN, { "Hit (with a direction: the moves); confirm in the menus", "Úder (se směrem: chvaty); potvrzení v nabídkách", "Úder (so smerom: chvaty); potvrdenie v ponukách" }, "A", "Enter" },
 	    { SDL_CONTROLLER_BUTTON_BACK, RETROK_ESCAPE, { "Back / leave the fight", "Zpět / opustit zápas", "Späť / opustiť zápas" }, "View / Back", "Esc" },
 	    { 0, 0, { "", "", "" }, "", "" } },
 	  { { { "The moves", "Chvaty", "Chvaty" },
@@ -65,11 +69,13 @@ static const Game kGames_[] = {
 	  { "MUTANT.IO", 0 },
 	  { { "dosbox_pure_cycles", "auto" }, { "dosbox_pure_aspect_correction", "false" }, { "dosbox_pure_menu_time", "0" },
 	    { "dosbox_pure_auto_mapping", "false" }, { "dosbox_pure_on_screen_keyboard", "false" }, { "", "" } },
+	  { RETROK_KP9, RETROK_KP3, RETROK_KP1, RETROK_KP7 },
+	  { "English", "Español", "Français" }, { "TEXTE.EN", "TEXTE.ES", "TEXTE.FR", "TEXTE.IO" },
 	  { // (the manual: the numeric keypad for the directions, Shift the fire button, F1-F3 the three forms, Esc pause)
-	    { SDL_CONTROLLER_BUTTON_DPAD_UP, RETROK_KP8, { "Up (jump)", "Nahoru (skok)", "Hore (skok)" }, "D-pad ↑", "Num 8" },
-	    { SDL_CONTROLLER_BUTTON_DPAD_DOWN, RETROK_KP2, { "Down", "Dolů", "Dole" }, "D-pad ↓", "Num 2" },
-	    { SDL_CONTROLLER_BUTTON_DPAD_LEFT, RETROK_KP4, { "Left", "Doleva", "Doľava" }, "D-pad ←", "Num 4" },
-	    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, RETROK_KP6, { "Right", "Doprava", "Doprava" }, "D-pad →", "Num 6" },
+	    { SDL_CONTROLLER_BUTTON_DPAD_UP, RETROK_KP8, { "Up (jump)", "Nahoru (skok)", "Hore (skok)" }, "D-pad ↑", "↑ / Num 8" },
+	    { SDL_CONTROLLER_BUTTON_DPAD_DOWN, RETROK_KP2, { "Down", "Dolů", "Dole" }, "D-pad ↓", "↓ / Num 2" },
+	    { SDL_CONTROLLER_BUTTON_DPAD_LEFT, RETROK_KP4, { "Left", "Doleva", "Doľava" }, "D-pad ←", "← / Num 4" },
+	    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, RETROK_KP6, { "Right", "Doprava", "Doprava" }, "D-pad →", "→ / Num 6" },
 	    { SDL_CONTROLLER_BUTTON_A, RETROK_LSHIFT, { "Fire (with a direction: the weapons)", "Střelba (se směrem: zbraně)", "Streľba (so smerom: zbrane)" }, "A", "Shift" },
 	    { SDL_CONTROLLER_BUTTON_X, RETROK_F1, { "Become the Cyborg", "Proměna v Kyborga", "Premena na Kyborga" }, "X", "F1" },
 	    { SDL_CONTROLLER_BUTTON_Y, RETROK_F2, { "Become the Dino", "Proměna v Dina", "Premena na Dina" }, "Y", "F2" },
