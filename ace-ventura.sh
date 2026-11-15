@@ -1,12 +1,16 @@
 #!/bin/sh
 # Ace Ventura (7th Level, 1996) through Wine. The game is a 16-bit Windows 3.1 program, which today's Wine
-# can't run by itself; OTVDM (winevdm) runs it inside Wine. The game must not see a big screen: on a 4K one it
-# sizes its window to the screen and crashes, so it gets a 640x480 Wine desktop of its own.
+# can't run by itself; OTVDM (winevdm) runs it inside Wine, in a 640x480 Wine desktop of its own (the game
+# sizes its window to the screen).
 #
 #   ace-ventura.sh [folder with ACE.EXE]
 #
-# Wine: the system's, or a portable build unpacked in ~/.local/share/oldies/wine.
-# OTVDM: unpacked in ~/.local/share/oldies/otvdm (the folder holding otvdm.exe, anywhere below it).
+# Wine: a portable build unpacked in ~/.local/share/oldies/wine (github.com/Kron4ek/Wine-Builds, the
+#   amd64-wow64 one), or the system's.
+# OTVDM: development build 2712 (ci.appveyor.com/project/otya128/winevdm) unpacked in
+#   ~/.local/share/oldies/otvdm-new, with ace-otvdm-patch.py run once on its dll/user.exe16: without that
+#   the game crashes a few seconds in ("Interrupt 0D #GP").
+# The game: the ACE folder of the CD, as it is (no installing).
 
 data="${XDG_DATA_HOME:-$HOME/.local/share}/oldies"
 game="${1:-$HOME/oldies/games/ace-ventura/cd/ACE}"
