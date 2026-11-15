@@ -70,8 +70,10 @@ The pause menu's Controls shows the same for the game being played.
   Blows has next to no text. The menus around the games are in the three languages.
 - **FSR 2–4, XeSS, the NPU**: built for 3D games (they need depth and motion from the game's engine); a 2D
   picture from an emulator has neither. FSR 1 and the neural nets work on finished pictures and are in.
-- **Ace Ventura** (7th Level, 1996) is a 16-bit Windows 3.1 game, not a DOS one. `ace-ventura.sh` in the
-  source tries it through Wine and OTVDM; there it loads and then crashes, so it's not part of the release.
+- **Ace Ventura** (7th Level, 1996) is a 16-bit Windows 3.1 game, not a DOS one, so it isn't in the shell
+  and gets none of the above. `ace-ventura.sh` in the source starts it through Wine and OTVDM (winevdm) in a
+  640×480 Wine desktop (on a 4K screen the game crashes without one); with gamescope installed that is
+  blown up to the whole screen.
 
 ## Building
 
