@@ -4,10 +4,15 @@
  * of it, and shows it through the same picture layer as the DOS games (hard pixels .. FSR 1 .. neural nets,
  * to the screen's resolution). The mouse, the keyboard and a controller are passed on to that server.
  *
- *   oldies-view DISPLAY [TITLE]         e.g. oldies-view :77 "Ace Ventura"
+ *   oldies-view DISPLAY [TITLE] [--subs PACK --game FOLDER --spy SOCKET]      e.g. oldies-view :77 "Ace Ventura"
  *
- * F7 next upscaling (Shift+F7 back), F8 dithering removal on / off, F11 full screen, F12 picture as PNG.
- * Controller: left stick the pointer, A left button, B right button, X Esc, Y F4, RB upscaling, LB dithering.
+ * Subtitles (subs.cpp), for a game that only speaks: PACK holds the lines of the game's speech clips, FOLDER
+ * the game's data files, and at SOCKET tgspy.so (preloaded into Wine) tells the game's sound.
+ *
+ * F7 next upscaling (Shift+F7 back), F8 dithering removal on / off, F9 subtitles (none, English, German,
+ * Czech), F11 full screen, F12 picture as PNG.
+ * Controller: left stick the pointer, A left button, B right button, X Esc, Y F4, RB upscaling, LB dithering,
+ * Back subtitles.
  */
 
 #include <stdint.h>
@@ -23,6 +28,8 @@
 #include <unistd.h>
 #include <SDL.h>
 #include "gfx.h"
+#include "subs.h"
+#include "ui.h"
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
@@ -41,6 +48,12 @@ static int g_mode = kScaleNeuralM;
 static bool g_fullHd, g_dedither = true, g_fullscreen = true, g_quit;
 static int g_threshold = 72; // (how far apart two colours may be and still be taken for a dither pair: 0..255)
 static int g_passes = 2;     // (how many times over: each pass reaches a point further)
+static bool g_haveSubs;      // a subtitle pack is there and the game's sound is listened to
+static int g_subs = 1;       // subtitles: 0 none, 1 English, 2 German, 3 Czech
+static const char *const kSubsName[1 + kSubsLangs] = { "off", "English", "Deutsch", "Česky" };
+static Canvas g_overlay;
+static std::string g_note;   // a short note in the corner (what a key just changed), until g_noteUntil
+static Uint32 g_noteUntil;
 
 static std::string configPath() {
 	const char *x = getenv("XDG_CONFIG_HOME");
@@ -61,17 +74,19 @@ static void loadConfig() {
 		else if (!strcmp(k, "fullscreen")) g_fullscreen = v != 0;
 		else if (!strcmp(k, "threshold")) g_threshold = v;
 		else if (!strcmp(k, "passes")) g_passes = v;
+		else if (!strcmp(k, "subs")) g_subs = v;
 	}
 	fclose(f);
 	if (g_mode < 0 || g_mode >= kScaleCount) g_mode = kScaleNeuralM;
 	if (g_threshold < 4 || g_threshold > 160) g_threshold = 72;
 	if (g_passes < 1 || g_passes > 4) g_passes = 2;
+	if (g_subs < 0 || g_subs > kSubsLangs) g_subs = 1;
 }
 
 static void saveConfig() {
 	FILE *f = fopen(configPath().c_str(), "w");
 	if (!f) return;
-	fprintf(f, "scale=%d\nfullhd=%d\ndedither=%d\nfullscreen=%d\nthreshold=%d\npasses=%d\n", g_mode, g_fullHd ? 1 : 0, g_dedither ? 1 : 0, g_fullscreen ? 1 : 0, g_threshold, g_passes);
+	fprintf(f, "scale=%d\nfullhd=%d\ndedither=%d\nfullscreen=%d\nthreshold=%d\npasses=%d\nsubs=%d\n", g_mode, g_fullHd ? 1 : 0, g_dedither ? 1 : 0, g_fullscreen ? 1 : 0, g_threshold, g_passes, g_subs);
 	fclose(f);
 }
 
@@ -195,6 +210,45 @@ static void sendPointer(int winX, int winY) {
 	XTestFakeMotionEvent(g_dpy, -1, x, y, CurrentTime);
 }
 
+static void note(const std::string &text) {
+	g_note = text;
+	g_noteUntil = SDL_GetTicks() + 2500;
+}
+
+// the texts over the picture: the subtitle at the bottom of the game's picture, the note in its top left corner
+static void renderOverlay(int dw, int dh, const std::string &subtitle, const std::string &corner) {
+	g_overlay.resize(dw, dh);
+	g_overlay.clear();
+	int gx, gy, gw, gh;
+	g_gfx->gameRect(&gx, &gy, &gw, &gh);
+	if (!subtitle.empty()) {
+		const float size = gh * 0.042f, pad = size * 0.45f;
+		std::vector<std::string> lines;
+		for (size_t at = 0; at <= subtitle.size();) { // (one speaker a paragraph)
+			size_t nl = subtitle.find('\n', at);
+			if (nl == std::string::npos) nl = subtitle.size();
+			const std::vector<std::string> part = Font_wrap(subtitle.substr(at, nl - at), size, true, gw * 0.84f);
+			lines.insert(lines.end(), part.begin(), part.end());
+			at = nl + 1;
+		}
+		if (lines.size() > 5) lines.erase(lines.begin(), lines.end() - 5);
+		float widest = 0;
+		for (size_t i = 0; i < lines.size(); ++i) { const float w = Font_width(lines[i], size, true); if (w > widest) widest = w; }
+		const float lineH = size * 1.3f, boxH = lines.size() * lineH + 2 * pad;
+		const float top = gy + gh - gh * 0.035f - boxH;
+		g_overlay.rect(gx + (gw - widest) / 2 - 2 * pad, top, widest + 4 * pad, boxH, 0xB8000000u, pad);
+		for (size_t i = 0; i < lines.size(); ++i) {
+			Font_draw(g_overlay, gx + (gw - Font_width(lines[i], size, true)) / 2, top + pad + i * lineH, lines[i], size, 0xFFFFFFFFu, true);
+		}
+	}
+	if (!corner.empty()) {
+		const float size = gh * 0.03f, pad = size * 0.5f;
+		const float w = Font_width(corner, size, false);
+		g_overlay.rect(gx + size, gy + size, w + 2 * pad, size * 1.3f + 2 * pad, 0xB8000000u, pad);
+		Font_draw(g_overlay, gx + size + pad, gy + size + pad, corner, size, 0xFFFFFFFFu, false);
+	}
+}
+
 static void applyMode(const char *title) {
 	int dw, dh;
 	SDL_GL_GetDrawableSize(g_window, &dw, &dh);
@@ -205,6 +259,7 @@ static void applyMode(const char *title) {
 	snprintf(buf, sizeof(buf), "%s  ·  %s%s%s", title, Gfx_modeName(g_mode), (g_fullHd && g_mode >= kScaleFsr && dh > 1080) ? " (Full HD)" : "",
 		g_dedither ? "  ·  dithering removed" : "");
 	SDL_SetWindowTitle(g_window, buf);
+	note(std::string(Gfx_modeName(g_mode)) + ((g_fullHd && g_mode >= kScaleFsr && dh > 1080) ? " (Full HD)" : "") + (g_dedither ? "  ·  dithering removed" : "  ·  dithering as it is"));
 	saveConfig();
 }
 
@@ -229,10 +284,16 @@ static void cycleMode(int dir) {
 
 int main(int argc, char **argv) {
 	if (argc < 2) {
-		fprintf(stderr, "usage: oldies-view DISPLAY [TITLE]\n");
+		fprintf(stderr, "usage: oldies-view DISPLAY [TITLE] [--subs PACK --game FOLDER --spy SOCKET]\n");
 		return 2;
 	}
-	const char *title = argc > 2 ? argv[2] : "Oldies";
+	const char *title = argc > 2 && argv[2][0] != '-' ? argv[2] : "Oldies";
+	const char *subsPack = 0, *gameDir = 0, *spySock = 0;
+	for (int i = 2; i + 1 < argc; ++i) {
+		if (!strcmp(argv[i], "--subs")) subsPack = argv[++i];
+		else if (!strcmp(argv[i], "--game")) gameDir = argv[++i];
+		else if (!strcmp(argv[i], "--spy")) spySock = argv[++i];
+	}
 	loadConfig();
 	if (!openCapture(argv[1])) {
 		fprintf(stderr, "oldies-view: can't take the screen of %s\n", argv[1]);
@@ -260,7 +321,13 @@ int main(int argc, char **argv) {
 	SDL_GL_GetDrawableSize(g_window, &dw, &dh);
 	g_gfx->resize(dw, dh);
 	applyMode(title);
+	g_note.clear();
 	SDL_ShowCursor(SDL_DISABLE);
+	Font_load((dir + "/assets").c_str());
+	if (subsPack && gameDir && spySock) g_haveSubs = Subs_start(gameDir, subsPack, spySock);
+	if (subsPack && !g_haveSubs) fprintf(stderr, "oldies-view: no subtitles (%s)\n", subsPack);
+	std::string shownSub, shownNote;
+	bool overlayShown = false;
 
 	SDL_GameController *pad = 0;
 	std::vector<uint32_t> raw(g_w * g_h), shown(g_w * g_h);
@@ -297,6 +364,16 @@ int main(int argc, char **argv) {
 				if (ev.key.repeat) break;
 				if (ev.key.keysym.sym == SDLK_F7) { cycleMode((ev.key.keysym.mod & KMOD_SHIFT) ? -1 : 1); applyMode(title); dirty = true; break; }
 				if (ev.key.keysym.sym == SDLK_F8) { g_dedither = !g_dedither; applyMode(title); break; }
+				if (ev.key.keysym.sym == SDLK_F9) {
+					if (g_haveSubs) {
+						g_subs = (g_subs + ((ev.key.keysym.mod & KMOD_SHIFT) ? kSubsLangs : 1)) % (kSubsLangs + 1);
+						note(std::string("Subtitles: ") + kSubsName[g_subs]);
+						saveConfig();
+					} else {
+						note("No subtitles for this game here");
+					}
+					break;
+				}
 				if (ev.key.keysym.sym == SDLK_F11) {
 					g_fullscreen = !g_fullscreen;
 					SDL_SetWindowFullscreen(g_window, g_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -329,6 +406,13 @@ int main(int argc, char **argv) {
 					case SDL_CONTROLLER_BUTTON_START: sendKey(XK_F4, down); break;
 					case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: if (down) { cycleMode(1); applyMode(title); dirty = true; } break;
 					case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: if (down) { g_dedither = !g_dedither; applyMode(title); } break;
+					case SDL_CONTROLLER_BUTTON_BACK:
+						if (down && g_haveSubs) {
+							g_subs = (g_subs + 1) % (kSubsLangs + 1);
+							note(std::string("Subtitles: ") + kSubsName[g_subs]);
+							saveConfig();
+						}
+						break;
 					}
 				}
 				break;
@@ -374,7 +458,25 @@ int main(int argc, char **argv) {
 			g_gfx->setGame(&shown[0], g_w, g_h);
 			dirty = true;
 		}
-		const bool shotNow = script && SDL_GetTicks() - start > (Uint32)(atof(script) * 1000);
+		{ // the texts over the picture, when they change
+			if (!g_note.empty() && SDL_GetTicks() > g_noteUntil) g_note.clear();
+			const std::string sub = (g_haveSubs && g_subs) ? Subs_current(g_subs - 1) : std::string();
+			if (sub != shownSub || g_note != shownNote || (overlayShown && (g_overlay.w != dw || g_overlay.h != dh))) {
+				shownSub = sub;
+				shownNote = g_note;
+				overlayShown = !sub.empty() || !g_note.empty();
+				if (overlayShown) {
+					renderOverlay(dw, dh, sub, g_note);
+					g_gfx->setOverlay(&g_overlay.px[0], g_overlay.w, g_overlay.h);
+				} else {
+					g_gfx->setOverlay(0, 0, 0);
+				}
+				dirty = true;
+			}
+		}
+		// (with subtitles, the test's picture waits for one to be showing, a minute at most)
+		const Uint32 shotAt = script ? (Uint32)(atof(script) * 1000) : 0;
+		const bool shotNow = script && SDL_GetTicks() - start > shotAt && (!g_haveSubs || !g_subs || !shownSub.empty() || SDL_GetTicks() - start > shotAt + 60000);
 		if (dirty || shotNow) {
 			g_gfx->draw();
 			if (shotNow) {
@@ -389,5 +491,6 @@ int main(int argc, char **argv) {
 		}
 	}
 	saveConfig();
+	Subs_stop();
 	return 0;
 }

@@ -75,6 +75,12 @@ The pause menu's Controls shows the same for the game being played.
   `oldies-view` shows that server's picture with the 256-colour dithering taken out, upscaled by FSR 1 or
   the neural nets (F7), with a controller's stick as the mouse. OTVDM needs `ace-otvdm-patch.py` run on it
   once (the game crashes a few seconds in without it). What to put where is at the top of the script.
+  **Subtitles** (F9: none / English / German / Czech, over either the English or the German game): the game
+  only speaks, so they're made from your own copy. `tools/tgwave.py` takes the speech clips out of the
+  game's files, `tools/tgstt.py` writes them down with Whisper, `tools/tgtranslate.py` makes a rough Czech
+  translation with a model on your computer, and `tools/tgsubs.py` puts the pack together (the tools' first
+  lines say how). While playing, `tgspy.so` inside Wine hands the game's sound to the viewer, which
+  recognises the clip that starts and shows its lines in time. No text of the game is in this repository.
 
 ## Building
 

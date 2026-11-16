@@ -9,6 +9,8 @@
 #      own and the viewer shows its picture with the 256-colour dithering taken out, upscaled by FSR 1 or a
 #      neural net to the screen. F7 next upscaling, F8 dithering removal on / off, F11 full screen; a
 #      controller's left stick is the pointer, A / B the mouse buttons.
+#      With a subtitle pack for the game's version in ~/.local/share/oldies/ace-subs (made by
+#      tools/tgsubs.py from the game's own speech), subtitles: F9 none / English / German / Czech.
 #   2. gamescope: full screen with FSR 1 (ACE_SHARPNESS 0 the sharpest .. 20; ACE_FILTER=nearest hard pixels).
 #   3. neither: a 640x480 window.
 #   ACE_SHOW=view | gamescope | window picks one.
@@ -71,11 +73,28 @@ view)
 	xpid=$!
 	i=0
 	while [ ! -e "/tmp/.X11-unix/X$n" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-	# (inside a 640x480 Wine desktop: without one the game's window stays black in a server with no window manager)
-	env -u WAYLAND_DISPLAY DISPLAY=":$n" wine explorer "/desktop=AceVentura,640x480" "$otvdm_win" ACE.EXE &
-	"$here/oldies-view" ":$n" "Ace Ventura" &
+	# subtitles: the pack made for these very data files (tools/tgsubs.py; its first line names INTRO.BIN's size).
+	# tgspy.so, inside Wine, tells the viewer the game's sound and which data it reads: by them the viewer
+	# knows the line being spoken. (The viewer first: it must be listening when the game starts reading.)
+	subs=""
+	spy="${XDG_RUNTIME_DIR:-/tmp}/oldies-spy-$n"
+	size=$(stat -c %s INTRO.BIN 2>/dev/null || stat -c %s intro.bin 2>/dev/null)
+	if [ -f "$here/tgspy.so" ]; then
+		for pack in "$data"/ace-subs/*.tsv; do
+			[ -f "$pack" ] && [ "$(head -1 "$pack")" = "#game INTRO.BIN $size" ] && subs="$pack"
+		done
+	fi
+	"$here/oldies-view" ":$n" "Ace Ventura" ${subs:+--subs "$subs" --game "$game" --spy "$spy"} &
 	vpid=$!
 	( sleep 15; env -u WAYLAND_DISPLAY DISPLAY=":$n" wineserver -w; kill $vpid 2>/dev/null ) &   # (the game was quit: so is the viewer)
+	sleep 0.5
+	# (inside a 640x480 Wine desktop: without one the game's window stays black in a server with no window manager)
+	if [ -n "$subs" ]; then
+		env -u WAYLAND_DISPLAY DISPLAY=":$n" TGSPY_DIR="$game" TGSPY_SOCK="$spy" LD_PRELOAD="$here/tgspy.so${LD_PRELOAD:+:$LD_PRELOAD}" \
+			wine explorer "/desktop=AceVentura,640x480" "$otvdm_win" ACE.EXE &
+	else
+		env -u WAYLAND_DISPLAY DISPLAY=":$n" wine explorer "/desktop=AceVentura,640x480" "$otvdm_win" ACE.EXE &
+	fi
 	wait $vpid
 	wineserver -k
 	kill $xpid 2>/dev/null

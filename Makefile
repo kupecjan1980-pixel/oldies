@@ -11,8 +11,12 @@ VERSION = $(shell sed -n 's/^\#define OLDIES_VERSION "\(.*\)"/\1/p' shell.cpp)
 all: obj oldies oldies-view
 
 # the viewer for a game in an X server of its own (Ace Ventura under Wine): needs libX11, libXext, libXtst, libXfixes
-oldies-view: obj/winview.o obj/gfx.o
-	$(CXX) -static-libstdc++ -static-libgcc -o $@ $^ $(LIBS) -lX11 -lXext -lXtst -lXfixes
+# (tgspy.so goes into Wine with it: it tells the viewer the game's sound and file reads, for the subtitles)
+oldies-view: obj/winview.o obj/gfx.o obj/ui.o obj/subs.o tgspy.so
+	$(CXX) -static-libstdc++ -static-libgcc -o $@ $(filter %.o,$^) $(LIBS) -lX11 -lXext -lXtst -lXfixes -lpthread
+
+tgspy.so: tgspy.c
+	$(CC) -O2 -Wall -shared -fPIC -o $@ $< -ldl
 
 oldies: $(OBJS)
 	$(CXX) -static-libstdc++ -static-libgcc -o $@ $^ $(LIBS)
@@ -36,6 +40,6 @@ dist: all
 	cd dist && tar -czf oldies-linux-$(VERSION).tar.gz oldies
 
 clean:
-	rm -rf obj oldies oldies-view
+	rm -rf obj oldies oldies-view tgspy.so
 
 -include obj/*.d
