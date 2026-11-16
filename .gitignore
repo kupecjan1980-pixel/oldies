@@ -4,3 +4,4 @@ cores/
 oldies
 oldies-view
 tgspy.so
+__pycache__/
