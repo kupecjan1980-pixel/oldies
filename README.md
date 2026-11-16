@@ -81,6 +81,9 @@ The pause menu's Controls shows the same for the game being played.
   translation with a model on your computer, and `tools/tgsubs.py` puts the pack together (the tools' first
   lines say how). While playing, `tgspy.so` inside Wine hands the game's sound to the viewer, which
   recognises the clip that starts and shows its lines in time. No text of the game is in this repository.
+  **Things to use**: the game writes the name of the thing under the pointer small and faint into a corner;
+  the viewer shows it big at the top. F10 (or a stick pressed) runs the pointer over the whole picture and
+  marks every thing that can be used, with its name, for a quarter of a minute.
 
 ## Building
 

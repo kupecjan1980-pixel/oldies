@@ -10,11 +10,12 @@
  * the game's data files, and at SOCKET tgspy.so (preloaded into Wine) tells the game's sound.
  *
  * F7 next upscaling (Shift+F7 back), F8 dithering removal on / off, F9 subtitles (none, English, German,
- * Czech), F11 full screen, F12 picture as PNG.
+ * Czech), F10 marks the things that can be used (once more: marks away), F11 full screen, F12 picture as PNG.
  * Controller: left stick the pointer, A left button, B right button, X Esc, Y F4, RB upscaling, LB dithering,
- * Back subtitles.
+ * Back subtitles, a stick pressed marks the things that can be used.
  */
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,24 @@ static bool g_haveSubs;      // a subtitle pack is there and the game's sound is
 static int g_subs = 1;       // subtitles: 0 none, 1 English, 2 German, 3 Czech
 static const char *const kSubsName[1 + kSubsLangs] = { "off", "English", "Deutsch", "Česky" };
 static Canvas g_overlay;
+// Things that can be used: the game draws its own pointer into the picture, an arrow, and a hand over a thing
+// that can be used. F10 takes the pointer over the whole picture (the picture shown stands still meanwhile),
+// sees where it turned into the hand, and marks those places for a while.
+enum { kScanStep = 24, kScanCols = 640 / kScanStep + 1, kScanRows = 480 / kScanStep + 1 };
+static bool g_scan;
+static int g_scanAt, g_scanBackX, g_scanBackY;
+static Uint32 g_scanSent;
+static std::vector<char> g_scanHit;
+// The game writes the name of the thing under the pointer small and faint into the bottom left corner, in one
+// colour: taken from there as a shape (no reading), it's shown big at the top, and beside each mark.
+enum { kLabelX = 78, kLabelY = 449, kLabelW = 340, kLabelH = 21 };
+typedef std::vector<uint8_t> Label; // kLabelW x kLabelH, 1 where the letters are; empty: none
+struct Mark { int x, y; Label label; };
+static std::vector<Mark> g_marks; // in the game's picture
+static Label g_hover;
+static std::vector<Label> g_scanLabel;
+static Uint32 g_marksUntil;
+static int g_marksSerial;
 static std::string g_note;   // a short note in the corner (what a key just changed), until g_noteUntil
 static Uint32 g_noteUntil;
 
@@ -210,6 +229,150 @@ static void sendPointer(int winX, int winY) {
 	XTestFakeMotionEvent(g_dpy, -1, x, y, CurrentTime);
 }
 
+// the game's pointer at (x, y) of a frame (BGRX): 1 the arrow, 2 the hand, 0 neither seen
+static int pointerAt(const uint32_t *px, int w, int h, int x, int y) {
+	int red = 0, skin = 0;
+	for (int j = y - 14; j <= y + 24; ++j) {
+		if (j < 0 || j >= h) continue;
+		for (int i = x - 14; i <= x + 21; ++i) {
+			if (i < 0 || i >= w) continue;
+			const uint32_t c = px[j * w + i];
+			const int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+			if (i >= x - 1 && j >= y - 1 && abs(r - 255) < 14 && abs(g - 50) < 14 && abs(b - 10) < 14) ++red;
+			if (i <= x + 14 && j <= y + 13 && abs(r - 246) < 14 && abs(g - 141) < 14 && abs(b - 106) < 14) ++skin;
+		}
+	}
+	// (at the picture's edge only a part of either shows)
+	const bool edge = x < 14 || y < 14 || x > w - 22 || y > h - 25;
+	if (skin >= (edge ? 50 : 120)) return 2;
+	if (red >= (edge ? 25 : 70)) return 1;
+	return 0;
+}
+
+static void labelOf(const uint32_t *px, int w, int h, Label &out) {
+	out.clear();
+	if (w < kLabelX + kLabelW || h < kLabelY + kLabelH) return;
+	Label m(kLabelW * kLabelH, 0);
+	int n = 0, left = kLabelW;
+	for (int j = 0; j < kLabelH; ++j) {
+		for (int i = 0; i < kLabelW; ++i) {
+			if ((px[(kLabelY + j) * w + kLabelX + i] & 0xFFFFFF) == 0xD17655) { m[j * kLabelW + i] = 1; ++n; if (i < left) left = i; }
+		}
+	}
+	if (n >= 40 && left >= 1 && left <= 5) out.swap(m); // (the writing starts at the same place every time)
+}
+
+// a label drawn into the overlay, its left top at (x, y), a point of the game's `scale` of the screen's
+static void drawLabel(const Label &m, float x, float y, float scale) {
+	int right = 0;
+	for (int j = 0; j < kLabelH; ++j) for (int i = right; i < kLabelW; ++i) if (m[j * kLabelW + i]) right = i;
+	const float pad = 5 * scale, tw = (right + 2) * scale, th = kLabelH * scale;
+	if (x + tw + 2 * pad > g_overlay.w) x = g_overlay.w - tw - 2 * pad;
+	if (x < 0) x = 0;
+	if (y + th + 2 * pad > g_overlay.h) y = g_overlay.h - th - 2 * pad;
+	if (y < 0) y = 0;
+	g_overlay.rect(x, y, tw + 2 * pad, th + 2 * pad, 0xC8000000u, pad);
+	const int x0 = (int)(x + pad), y0 = (int)(y + pad);
+	for (int j = 0; j < (int)th; ++j) {
+		const int py = y0 + j;
+		if (py < 0 || py >= g_overlay.h) continue;
+		for (int i = 0; i < (int)tw; ++i) {
+			const int px = x0 + i;
+			if (px < 0 || px >= g_overlay.w) continue;
+			// (between the shape's points: smooth edges)
+			const float fx = (i + 0.5f) / scale - 0.5f, fy = (j + 0.5f) / scale - 0.5f;
+			const int ix = (int)floorf(fx), iy = (int)floorf(fy);
+			const float ax = fx - ix, ay = fy - iy;
+			float a = 0;
+			for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
+				const int sx = ix + dx, sy = iy + dy;
+				if (sx < 0 || sy < 0 || sx >= kLabelW || sy >= kLabelH || !m[sy * kLabelW + sx]) continue;
+				a += (dx ? ax : 1 - ax) * (dy ? ay : 1 - ay);
+			}
+			a = (a - 0.3f) / 0.4f;
+			if (a <= 0) continue;
+			if (a > 1) a = 1;
+			uint8_t *p = (uint8_t *)&g_overlay.px[py * g_overlay.w + px]; // (premultiplied RGBA)
+			const float keep = 1 - a;
+			p[0] = (uint8_t)(255 * a + p[0] * keep);
+			p[1] = (uint8_t)(236 * a + p[1] * keep);
+			p[2] = (uint8_t)(150 * a + p[2] * keep);
+			p[3] = (uint8_t)(255 * a + p[3] * keep);
+		}
+	}
+}
+
+static void scanPoint(int at, int *x, int *y) {
+	*x = (at % kScanCols) * kScanStep + kScanStep / 2;
+	*y = (at / kScanCols) * kScanStep + kScanStep / 2;
+	if (*x > g_w - 2) *x = g_w - 2;
+	if (*y > g_h - 2) *y = g_h - 2;
+}
+
+static void scanStart() {
+	Window r, c; int rx = g_w / 2, ry = g_h / 2, wx, wy; unsigned mask;
+	XQueryPointer(g_dpy, g_root, &r, &c, &rx, &ry, &wx, &wy, &mask);
+	g_scanBackX = rx; g_scanBackY = ry;
+	g_scan = true;
+	g_scanAt = 0;
+	g_scanHit.assign(kScanCols * kScanRows, 0);
+	g_scanLabel.assign(kScanCols * kScanRows, Label());
+	g_marks.clear();
+	++g_marksSerial;
+	int x, y;
+	scanPoint(0, &x, &y);
+	XTestFakeMotionEvent(g_dpy, -1, x, y, CurrentTime);
+	g_scanSent = SDL_GetTicks();
+}
+
+// the places where the hand showed, one mark a thing: neighbouring places with the same name are one thing
+static void scanFinish() {
+	g_scan = false;
+	XTestFakeMotionEvent(g_dpy, -1, g_scanBackX, g_scanBackY, CurrentTime);
+	// (a place whose name didn't show in time takes a neighbour's: most likely the same thing)
+	for (int pass = 0; pass < 3; ++pass) {
+		for (int at = 0; at < (int)g_scanHit.size(); ++at) {
+			if (!g_scanHit[at] || !g_scanLabel[at].empty()) continue;
+			const int cx = at % kScanCols, cy = at / kScanCols;
+			for (int dy = -1; dy <= 1 && g_scanLabel[at].empty(); ++dy) for (int dx = -1; dx <= 1; ++dx) {
+				const int nx = cx + dx, ny = cy + dy;
+				if (nx < 0 || ny < 0 || nx >= kScanCols || ny >= kScanRows) continue;
+				if (g_scanHit[ny * kScanCols + nx] && !g_scanLabel[ny * kScanCols + nx].empty()) { g_scanLabel[at] = g_scanLabel[ny * kScanCols + nx]; break; }
+			}
+		}
+	}
+	std::vector<char> seen(g_scanHit.size(), 0);
+	for (int start = 0; start < (int)g_scanHit.size(); ++start) {
+		if (!g_scanHit[start] || seen[start]) continue;
+		std::vector<int> group(1, start);
+		seen[start] = 1;
+		for (size_t k = 0; k < group.size(); ++k) {
+			const int cx = group[k] % kScanCols, cy = group[k] / kScanCols;
+			for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+				const int nx = cx + dx, ny = cy + dy;
+				if (nx < 0 || ny < 0 || nx >= kScanCols || ny >= kScanRows) continue;
+				const int n = ny * kScanCols + nx;
+				if (g_scanHit[n] && !seen[n] && g_scanLabel[n] == g_scanLabel[start]) { seen[n] = 1; group.push_back(n); }
+			}
+		}
+		double mx = 0, my = 0;
+		for (size_t k = 0; k < group.size(); ++k) { mx += group[k] % kScanCols; my += group[k] / kScanCols; }
+		mx /= group.size(); my /= group.size();
+		int best = group[0];
+		double bestD = 1e9;
+		for (size_t k = 0; k < group.size(); ++k) { // (the mark on a place of the thing itself, the nearest to its middle)
+			const double d = (group[k] % kScanCols - mx) * (group[k] % kScanCols - mx) + (group[k] / kScanCols - my) * (group[k] / kScanCols - my);
+			if (d < bestD) { bestD = d; best = group[k]; }
+		}
+		Mark p;
+		scanPoint(best, &p.x, &p.y);
+		p.label = g_scanLabel[start];
+		g_marks.push_back(p);
+	}
+	g_marksUntil = SDL_GetTicks() + 15000;
+	++g_marksSerial;
+}
+
 static void note(const std::string &text) {
 	g_note = text;
 	g_noteUntil = SDL_GetTicks() + 2500;
@@ -239,6 +402,25 @@ static void renderOverlay(int dw, int dh, const std::string &subtitle, const std
 		g_overlay.rect(gx + (gw - widest) / 2 - 2 * pad, top, widest + 4 * pad, boxH, 0xB8000000u, pad);
 		for (size_t i = 0; i < lines.size(); ++i) {
 			Font_draw(g_overlay, gx + (gw - Font_width(lines[i], size, true)) / 2, top + pad + i * lineH, lines[i], size, 0xFFFFFFFFu, true);
+		}
+	}
+	if (!g_scan) {
+		for (size_t i = 0; i < g_marks.size(); ++i) {
+			const float cx = gx + (g_marks[i].x + 0.5f) * gw / g_w, cy = gy + (g_marks[i].y + 0.5f) * gh / g_h, r = gh * 0.022f;
+			g_overlay.ring(cx, cy, r, r * 0.42f, 0xC0000000u);
+			g_overlay.ring(cx, cy, r, r * 0.22f, 0xFFFFE040u);
+			g_overlay.circle(cx, cy, r * 0.28f, 0xFFFFE040u);
+		}
+		for (size_t i = 0; i < g_marks.size(); ++i) { // (the names over the rings)
+			if (g_marks[i].label.empty()) continue;
+			const float cx = gx + (g_marks[i].x + 0.5f) * gw / g_w, cy = gy + (g_marks[i].y + 0.5f) * gh / g_h, r = gh * 0.022f;
+			drawLabel(g_marks[i].label, cx + r * 1.5f, cy - r * 1.2f, gh / 480.f * 0.8f);
+		}
+		if (!g_hover.empty() && g_marks.empty()) {
+			const float scale = gh / 480.f * 1.6f;
+			int right = 0;
+			for (int j = 0; j < kLabelH; ++j) for (int i = right; i < kLabelW; ++i) if (g_hover[j * kLabelW + i]) right = i;
+			drawLabel(g_hover, gx + (gw - (right + 12) * scale) / 2, gy + gh * 0.03f, scale);
 		}
 	}
 	if (!corner.empty()) {
@@ -328,6 +510,8 @@ int main(int argc, char **argv) {
 	if (subsPack && !g_haveSubs) fprintf(stderr, "oldies-view: no subtitles (%s)\n", subsPack);
 	std::string shownSub, shownNote;
 	bool overlayShown = false;
+	int shownMarks = 0;
+	const char *scanTest = getenv("OLDIES_VIEW_SCAN"); // (for testing: the things looked for after so many seconds)
 
 	SDL_GameController *pad = 0;
 	std::vector<uint32_t> raw(g_w * g_h), shown(g_w * g_h);
@@ -352,9 +536,11 @@ int main(int argc, char **argv) {
 					dirty = true;
 				}
 				break;
-			case SDL_MOUSEMOTION: sendPointer(ev.motion.x, ev.motion.y); break;
+			case SDL_MOUSEMOTION: if (!g_scan) sendPointer(ev.motion.x, ev.motion.y); break;
 			case SDL_MOUSEBUTTONDOWN:
 			case SDL_MOUSEBUTTONUP: {
+					if (g_scan) break;
+					if (!g_marks.empty()) { g_marks.clear(); ++g_marksSerial; }
 					sendPointer(ev.button.x, ev.button.y);
 					const int b = ev.button.button == SDL_BUTTON_LEFT ? 1 : ev.button.button == SDL_BUTTON_MIDDLE ? 2 : ev.button.button == SDL_BUTTON_RIGHT ? 3 : 0;
 					if (b) XTestFakeButtonEvent(g_dpy, b, ev.type == SDL_MOUSEBUTTONDOWN ? True : False, CurrentTime);
@@ -372,6 +558,11 @@ int main(int argc, char **argv) {
 					} else {
 						note("No subtitles for this game here");
 					}
+					break;
+				}
+				if (ev.key.keysym.sym == SDLK_F10) {
+					if (!g_scan && !g_marks.empty()) { g_marks.clear(); ++g_marksSerial; }
+					else if (!g_scan) scanStart();
 					break;
 				}
 				if (ev.key.keysym.sym == SDLK_F11) {
@@ -406,6 +597,10 @@ int main(int argc, char **argv) {
 					case SDL_CONTROLLER_BUTTON_START: sendKey(XK_F4, down); break;
 					case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: if (down) { cycleMode(1); applyMode(title); dirty = true; } break;
 					case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: if (down) { g_dedither = !g_dedither; applyMode(title); } break;
+					case SDL_CONTROLLER_BUTTON_LEFTSTICK:
+					case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+						if (down && !g_scan) { if (!g_marks.empty()) { g_marks.clear(); ++g_marksSerial; } else scanStart(); }
+						break;
 					case SDL_CONTROLLER_BUTTON_BACK:
 						if (down && g_haveSubs) {
 							g_subs = (g_subs + 1) % (kSubsLangs + 1);
@@ -418,7 +613,7 @@ int main(int argc, char **argv) {
 				break;
 			}
 		}
-		if (pad) { // (the left stick moves the pointer: slowly near the middle, faster further out)
+		if (pad && !g_scan) { // (the left stick moves the pointer: slowly near the middle, faster further out)
 			const double ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) / 32768.0, ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) / 32768.0;
 			if (ax * ax + ay * ay > 0.03) {
 				Window r, c; int rx, ry, wx, wy; unsigned mask;
@@ -433,14 +628,49 @@ int main(int argc, char **argv) {
 		XFlush(g_dpy);
 
 		if (!XShmGetImage(g_dpy, g_root, g_img, 0, 0, AllPlanes)) { SDL_Delay(50); continue; }
-		uint32_t hash = 2166136261u;
 		const uint32_t *px = (const uint32_t *)g_img->data;
+		if (g_scan) { // the pointer at the next place once the game has drawn it at this one (or doesn't, in time)
+			int x, y;
+			scanPoint(g_scanAt, &x, &y);
+			const int what = pointerAt(px, g_w, g_h, x, y);
+			Label seenLabel;
+			if (what == 2) labelOf(px, g_w, g_h, seenLabel);
+			// (the hand: its name is waited for a little too)
+			if ((what == 2 && (!seenLabel.empty() || SDL_GetTicks() - g_scanSent > 120)) || what == 1 || SDL_GetTicks() - g_scanSent > 40) {
+				if (what == 2) { g_scanHit[g_scanAt] = 1; g_scanLabel[g_scanAt] = seenLabel; }
+				if (getenv("OLDIES_VIEW_SCAN")) fprintf(stderr, "%c%s", ".-#"[what == 2 ? 2 : what == 1 ? 0 : 1], (g_scanAt + 1) % kScanCols ? "" : "\n");
+				if (++g_scanAt >= kScanCols * kScanRows) {
+					scanFinish();
+					char buf[80];
+					snprintf(buf, sizeof(buf), g_marks.empty() ? "Nothing to use found here" : "%d things to use", (int)g_marks.size());
+					note(buf);
+				} else {
+					scanPoint(g_scanAt, &x, &y);
+					XTestFakeMotionEvent(g_dpy, -1, x, y, CurrentTime);
+					g_scanSent = SDL_GetTicks();
+					if (g_scanAt % kScanCols == 0) {
+						char buf[80];
+						snprintf(buf, sizeof(buf), "Looking for things to use…  %d %%", g_scanAt * 100 / (kScanCols * kScanRows));
+						note(buf);
+					}
+				}
+			}
+			XFlush(g_dpy);
+		}
+		uint32_t hash = 2166136261u;
 		for (int i = 0; i < g_w * g_h; i += 3) hash = (hash ^ px[i]) * 16777619u;
 		XFixesCursorImage *cur = XFixesGetCursorImage(g_dpy);
 		const unsigned long serial = cur ? cur->cursor_serial : 0;
 		const int cx = cur ? cur->x : -1, cy = cur ? cur->y : -1;
 		if (cur) XFree(cur);
-		if (hash != lastHash || serial != lastCursor || cx != lastCx || cy != lastCy || g_dedither != lastDedither) {
+		if (!g_scan) { // the name of the thing under the pointer
+			Label now;
+			labelOf(px, g_w, g_h, now);
+			if (now != g_hover) { g_hover.swap(now); ++g_marksSerial; }
+		}
+		if (g_scan) {
+			// (the picture stands still while the pointer runs over it)
+		} else if (hash != lastHash || serial != lastCursor || cx != lastCx || cy != lastCy || g_dedither != lastDedither) {
 			lastHash = hash; lastCursor = serial; lastCx = cx; lastCy = cy; lastDedither = g_dedither;
 			for (int i = 0; i < g_w * g_h; ++i) { // (BGRX -> RGBA)
 				const uint32_t c = px[i];
@@ -461,10 +691,12 @@ int main(int argc, char **argv) {
 		{ // the texts over the picture, when they change
 			if (!g_note.empty() && SDL_GetTicks() > g_noteUntil) g_note.clear();
 			const std::string sub = (g_haveSubs && g_subs) ? Subs_current(g_subs - 1) : std::string();
-			if (sub != shownSub || g_note != shownNote || (overlayShown && (g_overlay.w != dw || g_overlay.h != dh))) {
+			if (!g_marks.empty() && !g_scan && SDL_GetTicks() > g_marksUntil) { g_marks.clear(); ++g_marksSerial; }
+			if (sub != shownSub || g_note != shownNote || g_marksSerial != shownMarks || (overlayShown && (g_overlay.w != dw || g_overlay.h != dh))) {
 				shownSub = sub;
 				shownNote = g_note;
-				overlayShown = !sub.empty() || !g_note.empty();
+				shownMarks = g_marksSerial;
+				overlayShown = !sub.empty() || !g_note.empty() || !g_marks.empty() || !g_hover.empty();
 				if (overlayShown) {
 					renderOverlay(dw, dh, sub, g_note);
 					g_gfx->setOverlay(&g_overlay.px[0], g_overlay.w, g_overlay.h);
@@ -474,9 +706,17 @@ int main(int argc, char **argv) {
 				dirty = true;
 			}
 		}
+		if (scanTest && SDL_GetTicks() - start > (Uint32)(atof(scanTest) * 1000)) {
+			scanTest = 0;
+			scanStart();
+			fprintf(stderr, "scan: started at %u ms\n", SDL_GetTicks() - start);
+		}
+		static bool wasScan;
+		if (wasScan && !g_scan) fprintf(stderr, "scan: done at %u ms, %d things\n", SDL_GetTicks() - start, (int)g_marks.size());
+		wasScan = g_scan;
 		// (with subtitles, the test's picture waits for one to be showing, a minute at most)
 		const Uint32 shotAt = script ? (Uint32)(atof(script) * 1000) : 0;
-		const bool shotNow = script && SDL_GetTicks() - start > shotAt && (!g_haveSubs || !g_subs || !shownSub.empty() || SDL_GetTicks() - start > shotAt + 60000);
+		const bool shotNow = script && SDL_GetTicks() - start > shotAt && (!g_haveSubs || getenv("OLDIES_VIEW_SCAN") || !g_subs || !shownSub.empty() || SDL_GetTicks() - start > shotAt + 60000);
 		if (dirty || shotNow) {
 			g_gfx->draw();
 			if (shotNow) {
@@ -487,7 +727,7 @@ int main(int argc, char **argv) {
 			SDL_GL_SwapWindow(g_window);
 			dirty = false;
 		} else {
-			SDL_Delay(8);
+			SDL_Delay(g_scan ? 2 : 8);
 		}
 	}
 	saveConfig();

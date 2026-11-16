@@ -11,6 +11,7 @@
 #      controller's left stick is the pointer, A / B the mouse buttons.
 #      With a subtitle pack for the game's version in ~/.local/share/oldies/ace-subs (made by
 #      tools/tgsubs.py from the game's own speech), subtitles: F9 none / English / German / Czech.
+#      F10 marks the things that can be used, with their names.
 #   2. gamescope: full screen with FSR 1 (ACE_SHARPNESS 0 the sharpest .. 20; ACE_FILTER=nearest hard pixels).
 #   3. neither: a 640x480 window.
 #   ACE_SHOW=view | gamescope | window picks one.
